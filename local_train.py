@@ -9,14 +9,14 @@ import zarr
 # ------------------
 # Stable Local Paths
 # ------------------
-# Directory for training data and network output 
-data_dir = '/data/platelets-deep'
+# Directory for training data and network output
+data_dir = '/Users/jni/data/platelets-deep'
 # Path for original image volumes for which GT was generated
-image_paths = [os.path.join(data_dir, '191113_IVMTR26_I3_E3_t58_cang_training_image.zarr')] #, 
-                  # os.path.join(data_dir, '191113_IVMTR26_Inj3_cang_exp3_t74_zyx-coords.zarr')]
+image_paths = [os.path.join(data_dir,
+    '191113_IVMTR26_Inj3_exp3_t58_cang_training_image.zarr')] #,
 # Path for GT labels volumes
-labels_paths = [os.path.join(data_dir, '191113_IVMTR26_I3_E3_t58_cang_training_labels.zarr')]#, 
-                  #  os.path.join(data_dir, '191113_IVMTR26_Inj3_cang_exp3_labels_t74_GT_zyx-coords.zarr')]
+labels_paths = [os.path.join(data_dir,
+    '191113_IVMTR26_Inj3_exp3_t58_cang_training_labels.zarr')]#,
 
 
 # -----------------------
@@ -39,22 +39,22 @@ if METHOD == 'get':
     epochs = 4
     lr = .01
     loss_function = 'BCELoss'
-    chan_weights = (1., 2., 2.) # only used for weighted BCE 
+    chan_weights = (1., 2., 2.) # only used for weighted BCE
     weights = None # can load and continue training
     update_every = 20 # how many batches before printing loss
     # -----------
     # Train U-net
-    # ----------- 
+    # -----------
     # with newly generated label chunks
     unet = train.train_unet_get_labels(
-                                       out_dir, 
-                                       image_paths, 
-                                       labels_paths, 
-                                       suffix=suffix, 
-                                       n_each=n_each, 
-                                       channels=channels, 
-                                       validation_prop=validation_prop, 
-                                       scale=scale, 
+                                       out_dir,
+                                       image_paths,
+                                       labels_paths,
+                                       suffix=suffix,
+                                       n_each=n_each,
+                                       channels=channels,
+                                       validation_prop=validation_prop,
+                                       scale=scale,
                                        epochs=epochs,
                                        lr=lr,
                                        loss_function=loss_function,

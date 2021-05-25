@@ -12,6 +12,7 @@ from skimage.filters import threshold_otsu
 from skimage import filters
 from skimage.measure import regionprops
 from skimage.metrics import variation_of_information
+from skimage import morphology
 from watershed import watershed
 from time import time
 import cv2
@@ -26,25 +27,25 @@ import umetrics
 # --------------------------------
 
 def segment_from_directory(
-        directory, 
+        directory,
         suffix,
-        affinities_channels, 
-        centroids_channel, 
-        thresholding_channel, 
+        affinities_channels,
+        centroids_channel,
+        thresholding_channel,
         scale = (4, 1, 1),
-        w_scale=None, 
+        w_scale=None,
         compactness=0.,
-        display=True, 
-        validation=False, 
+        display=True,
+        validation=False,
         dog_config=None,
         save=True,
         **kwargs
         #
     ):
     dog_comp = dog_config is not None
-    images, _, output, GT, ids = get_dataset(directory, 
-                                        GT=True, 
-                                        validation=validation, 
+    images, _, output, GT, ids = get_dataset(directory,
+                                        GT=True,
+                                        validation=validation,
                                         return_ID=True)
     images = da.squeeze(images)
     print(output.shape)
@@ -60,11 +61,11 @@ def segment_from_directory(
     for i in range(output.shape[0]):
         gt = GT[i].compute()
         seg, _, mask = segment_output_image(
-                output[i], 
-                affinities_channels, 
-                centroids_channel, 
-                thresholding_channel, 
-                scale=w_scale, 
+                output[i],
+                affinities_channels,
+                centroids_channel,
+                thresholding_channel,
+                scale=w_scale,
                 compactness=0.)
         vi = variation_of_information(gt, seg)
         generate_IoU_data(gt, seg, IoU_dict)
@@ -139,74 +140,81 @@ def segment_from_directory(
         v.add_image(images, name='Input images', blending='additive', visible=True, scale=v_scale)
         v.add_image(c, name='Thresholding channel', blending='additive', visible=False, scale=v_scale)
         v.add_image(cl, name='Centroids channel', blending='additive', visible=False, scale=v_scale)
-        v.add_image(z_affs, name='z affinities', blending='additive', visible=False, scale=v_scale, 
+        v.add_image(z_affs, name='z affinities', blending='additive', visible=False, scale=v_scale,
                     colormap='bop purple')
-        v.add_image(y_affs, name='y affinities', blending='additive', visible=False, scale=v_scale, 
+        v.add_image(y_affs, name='y affinities', blending='additive', visible=False, scale=v_scale,
                     colormap='bop orange')
-        v.add_image(x_affs, name='x affinities', blending='additive', visible=False, scale=v_scale, 
+        v.add_image(x_affs, name='x affinities', blending='additive', visible=False, scale=v_scale,
                     colormap='bop blue')
         v.add_labels(masks, name='Masks', blending='additive', visible=False, scale=v_scale)
         v.add_labels(GT, name='Ground truth', blending='additive', visible=False, scale=v_scale)
-        v.add_labels(segmentations, name='Segmentations', blending='additive', visible=True, 
+        v.add_labels(segmentations, name='Segmentations', blending='additive', visible=True,
                      scale=v_scale)
         if dog_comp:
-            v.add_labels(dog_masks, name='DoG Masks', 
-                         blending='additive', visible=False, 
+            v.add_labels(dog_masks, name='DoG Masks',
+                         blending='additive', visible=False,
                          scale=v_scale)
-            v.add_labels(dog_segs, name='DoG Segmentations', 
-                         blending='additive', visible=True, 
+            v.add_labels(dog_segs, name='DoG Segmentations',
+                         blending='additive', visible=True,
                          scale=v_scale)
         napari.run()
 
+from time import time, sleep
+from napari.qt import thread_worker
 
 # --------------------
 # Segment U-net Output
 # --------------------
 
 def segment_output_image(
-        unet_output, 
-        affinities_channels, 
-        centroids_channel, 
-        thresholding_channel, 
-        scale=None, 
-        compactness=0., 
-        absolute_thresh=None
+        unet_output,
+        affinities_channels,
+        centroids_channel,
+        thresholding_channel,
+        scale=None,
+        compactness=0.,
+        absolute_thresh=None,
+        out=None,
     ):
     '''
     Parameters
     ----------
     unet_output: np.ndarray or dask.array.core.Array
-        Output from U-net inclusive of all channels. If there is an extra 
+        Output from U-net inclusive of all channels. If there is an extra
         dim of size 1, this will be squeezed out. Therefore shape may be
         (1, c, z, y, x) or (c, z, y, x).
     affinities_channels: tuple of int
-        Ints, in order (z, y, x) describe the channel indicies to which 
+        Ints, in order (z, y, x) describe the channel indicies to which
         the z, y, and x short-range affinities belong.
     centroids_channel: int
-        Describes the channel index for the channel that is used to find 
+        Describes the channel index for the channel that is used to find
         centroids.
     thresholding_channel: in
         Describes the channel index for the channel that is used to find
         the mask for watershed.
     '''
-    t = time()
     if isinstance(unet_output, Array):
         unet_output = unet_output.compute()
     unet_output = np.squeeze(unet_output)
     # Get the affinities image (a, z, y, x)
-    affinties = []
-    for c in affinities_channels:
-        affinties.append(unet_output[c, ...]/unet_output[c, ...].max())
-    affinties = np.stack(affinties)
-    affinties = np.pad(affinties, 
-                       ((0, 0), (1, 1), (1, 1), (1, 1)), 
-                       constant_values=0)
+    affinities = unet_output[affinities_channels]
+    affinities /= np.max(affinities, axis=(1, 2, 3)).reshape((-1, 1, 1, 1))
+    affinities = np.pad(
+        affinities,
+        ((0, 0), (1, 1), (1, 1), (1, 1)),
+        mode='constant',
+        constant_values=0,
+    )
     # Get the image for finding centroids
-    centroids_img = unet_output[centroids_channel]
-    centroids_img = np.pad(centroids_img, 1, constant_values=0)
+    centroids_img = np.pad(
+        unet_output[centroids_channel],
+        1,
+        mode='constant',
+        constant_values=0,
+    )
     # find the centroids
     centroids = _get_centroids(centroids_img)
-    # Get the image for finding the mask 
+    # Get the image for finding the mask
     masking_img = unet_output[thresholding_channel]
     # find the mask for use with watershed
     if absolute_thresh is None:
@@ -214,57 +222,45 @@ def segment_output_image(
     else:
         mask = masking_img > absolute_thresh
     mask = np.pad(mask, 1, constant_values=0) # edge voxels must be 0
-    mask, centroids = _remove_unwanted_objects(mask, centroids, min_area=10, max_area=10000)
-    if centroids.shape[0] != 0:
-        # affinity-based watershed
-        segmentation = watershed(affinties, centroids, mask, 
-                             affinities=True, scale=scale, 
-                             compactness=compactness)
-        segmentation = segmentation[1:-1, 1:-1, 1:-1]
-        segmentation = segmentation.astype(int)
-        print(f'Obtained segmentation in {time() - t} seconds')
-    else:
-        segmentation = np.zeros(mask[1:-1, 1:-1, 1:-1].shape, dtype=int)
+    mask, centroids = _remove_unwanted_objects(
+        mask, centroids, min_area=10, max_area=10000
+        )
+    # affinity-based watershed
+    segmentation = yield from watershed(
+            affinities, centroids, mask,
+            affinities=True, scale=scale,
+            compactness=compactness, out=out
+            )
+    segmentation = segmentation[1:-1, 1:-1, 1:-1]
     seeds = centroids - 1
     return segmentation, seeds, mask
 
 
 def _get_mask(img, sigma=2):
-    thresh = threshold_otsu(filters.gaussian(img, sigma=sigma))
+    thresh = threshold_otsu(
+        filters.gaussian(img, sigma=(sigma/4, sigma, sigma))
+        )
     mask = img > thresh
     return mask
 
 
 def _get_centroids(cent, gaussian=True):
     if gaussian:
-        # won't blur along z, can't afford to do that
-        for i in range(cent.shape[0]):
-            cent[i, ...] = filters.gaussian(cent[i, ...])
+        cent = filters.gaussian(cent, sigma=(0, 1, 1))
     centroids = peak_local_max(cent, threshold_abs=.04) #* c_scale
     #centroids = blob_log(cent, min_sigma=min_sigma, max_sigma=max_sigma, threshold=threshold)
     return centroids
 
 
 def _remove_unwanted_objects(mask, centroids, min_area=0, max_area=10000):
-    labs, _ = label(mask)
-    props = regionprops(labs)
-    new = np.zeros_like(mask)
-    a_s = []
-    for prop in props:
-        a = prop['area']
-        a_s.append(a)
-        if a >= min_area and a < max_area:
-            l = prop['label']
-            new = np.where(labs == l, 1, new)
-    new_cent = []
-    for c in centroids:
-        try:
-            if new[c[-3], c[-2], c[-1]] == 1:
-                new_cent.append(c)
-        except IndexError:
-            pass
-    #print('min: ', np.min(a_s), ' max: ', np.max(a_s))
-    return new, np.array(new_cent)
+    labels, _ = label(mask)
+    labels_no_small = morphology.remove_small_objects(labels, min_size=min_area)
+    labels_large = morphology.remove_small_objects(labels_no_small, min_size=max_area)
+    labels_goldilocks = labels_no_small ^ labels_large
+    centroid_labels = labels_goldilocks[tuple(centroids.T)]
+    new_centroids = centroids[centroid_labels > 0]
+    new_mask = labels_goldilocks.astype(bool)
+    return new_mask, new_centroids
 
 
 def convert_axial_offsets(output, chan_axis=1, zyx_chans=(3, 4, 5)):
@@ -346,9 +342,9 @@ def dog_segmentation(vol, conf):
     v_dog_thr = v_dog > conf['threshold']
     v_dog_thr = img_as_ubyte(v_dog_thr)
     # seeds for watershed
-    local_maxi = peak_local_max(v_dog, 
-                                indices=False, 
-                                min_distance=conf['peak_min_dist'], 
+    local_maxi = peak_local_max(v_dog,
+                                indices=False,
+                                min_distance=conf['peak_min_dist'],
                                 labels=v_dog_thr)
     markers, num_objects = ndi.label(local_maxi, structure=np.ones((3,3,3)))
     # watershed
@@ -373,8 +369,8 @@ def metrics_for_stack(directory, name, seg, gt):
 
 
 def calc_ap(result):
-        denominator = result.n_true_positives + result.n_false_negatives + result.n_false_positives
-        return result.n_true_positives / denominator
+    denominator = result.n_true_positives + result.n_false_negatives + result.n_false_positives
+    return result.n_true_positives / denominator
 
 
 def generate_IoU_dict(thresholds=(0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9)):
@@ -406,19 +402,19 @@ def generate_IoU_data(gt, seg, IoU_dict, thresholds=(0.3, 0.35, 0.4, 0.45, 0.5, 
     for t in thresholds:
         result = umetrics.calculate(gt, seg, strict=True, iou_threshold=t)
         n = f't{t}_true_positives'
-        IoU_dict[n].append(result.n_true_positives) 
+        IoU_dict[n].append(result.n_true_positives)
         n = f't{t}_false_positives'
-        IoU_dict[n].append(result.n_false_positives) 
+        IoU_dict[n].append(result.n_false_positives)
         n = f't{t}_false_negatives'
-        IoU_dict[n].append(result.n_false_negatives) 
+        IoU_dict[n].append(result.n_false_negatives)
         n = f't{t}_IoU'
-        IoU_dict[n].append(result.results.IoU) 
+        IoU_dict[n].append(result.results.IoU)
         n = f't{t}_Jaccard'
-        IoU_dict[n].append(result.results.Jaccard) 
+        IoU_dict[n].append(result.results.Jaccard)
         n = f't{t}_pixel_identity'
-        IoU_dict[n].append(result.results.pixel_identity) 
+        IoU_dict[n].append(result.results.pixel_identity)
         n = f't{t}_localization_error'
-        IoU_dict[n].append(result.results.localization_error) 
+        IoU_dict[n].append(result.results.localization_error)
         n = f't{t}_per_image_average_precision'
         IoU_dict[n].append(calc_ap(result))
         if t == thresholds[0]:
@@ -436,7 +432,7 @@ def save_data(data_dict, name, directory, suffix):
 
 
 def generate_ap_scores(df, name, directory, suffix, thresholds=(0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9)):
-    ap_scores = {'average_precision' : [], 
+    ap_scores = {'average_precision' : [],
                  'threshold': []}
     for t in thresholds:
         ap_scores['threshold'].append(t)
@@ -454,50 +450,71 @@ def generate_ap_scores(df, name, directory, suffix, thresholds=(0.3, 0.35, 0.4, 
 
 
 if __name__ == '__main__':
+    # abi's
     import os
-    #data_dir = '/Users/amcg0011/Data/pia-tracking/cang_training'
     data_dir = '/home/abigail/data/platelet-segmentation-training'
     train_dir = os.path.join(data_dir, '210505_181203_seed_z-1_y-1_x-1_m_centg')
     channels = ('z-1', 'y-1', 'x-1', 'mask', 'centroid-gauss')
     images, labs, output = get_dataset(train_dir)
-    #o88 = output[88]
     aff_chans = (0, 1, 2)
     cent_chan = 4
     mask_chan = 3
-    #seg88, s88 = segment_output_image(o88, aff_chans, cent_chan, mask_chan) #, scale=(4, 1, 1))
-    #seg88s, s88s = segment_output_image(o88, aff_chans, cent_chan, mask_chan, scale=(4, 1, 1))
-    #seg88c, s88c = segment_output_image(o88, aff_chans, cent_chan, mask_chan, compactness=0.5) #, scale=(4, 1, 1))
-    #i88 = images[88]
-    #l88 = labs[88]
-    #v = napari.view_image(i88, name='image', scale=(4, 1, 1), blending='additive')
-    #v.add_labels(l88, name='labels', scale=(4, 1, 1), visible=False)
-    #v.add_image(o88[aff_chans[0]], name='z affinities', 
-              #  colormap='bop purple', scale=(4, 1, 1), 
-               # visible=False, blending='additive')
-    #v.add_image(o88[aff_chans[1]], name='y affinities', 
-              #  colormap='bop orange', scale=(4, 1, 1), 
-              #  visible=False, blending='additive')
-    #v.add_image(o88[aff_chans[2]], name='x affinities', 
-              #  colormap='bop blue', scale=(4, 1, 1), 
-              #  visible=False, blending='additive')
-    #v.add_labels(seg88, name='affinity watershed', 
-               #  scale=(4, 1, 1), blending='additive')
-    #v.add_labels(seg88s, name='anisotropic affinity watershed', 
-               #  scale=(4, 1, 1), blending='additive')
-    #v.add_labels(seg88c, name='compact affinity watershed', 
-        #         scale=(4, 1, 1), blending='additive')
-    #v.add_points(s88, name='seeds', scale=(4, 1, 1), size=1)
-    #napari.run()
 
     segment_from_directory(
-        train_dir, 
+        train_dir,
         'seed_z-1_y-1_x-1_m_centg',
-        aff_chans, 
-        cent_chan, 
-        mask_chan, 
+        aff_chans,
+        cent_chan,
+        mask_chan,
         scale = (4, 1, 1),
-        w_scale=None, 
+        w_scale=None,
         compactness=0.,
-        display=True, 
+        display=True,
         validation=True)
+
+    # juan's
+    import napari
+
+    data_dir = '/Users/jni/data/platelets-deep'
+    train_dir = os.path.join(data_dir, '210407_training_0')
+    channels = ('z-1', 'z-2', 'y-1', 'y-2', 'y-3', 'x-1', 'x-2', 'x-3',
+            'centreness', 'centreness-log', 'centroid-gauss')
+    images, labs, output = get_dataset(train_dir)
+    i88 = np.asarray(images[88])
+    l88 = np.asarray(labs[88])
+    o88 = output[88]
+    aff_chans = (0, 2, 5)
+    cent_chan = 9
+    mask_chan = 8
+    padded_shape = tuple(s + 2 for s in l88.shape)
+    seg88s = np.pad(np.zeros_like(i88[0], dtype=np.int32), 1, constant_values=0)
+    v = napari.Viewer(ndisplay=3)
+    v.add_image(i88, name='original image', scale=(4, 1, 1),
+            visible=True, blending='additive', channel_axis=0)
+    v.add_image(o88[aff_chans[0]], name='z affinities',
+                colormap='bop purple', scale=(4, 1, 1), translate=(-2, 0, 0),
+                visible=False, blending='additive')
+    v.add_image(o88[aff_chans[1]], name='y affinities',
+                colormap='bop orange', scale=(4, 1, 1), translate=(0, -0.5, 0),
+                visible=False, blending='additive')
+    v.add_image(o88[aff_chans[2]], name='x affinities',
+                colormap='bop blue', scale=(4, 1, 1), translate=(0, 0, -0.5),
+                visible=False, blending='additive')
+    s_layer = v.add_labels(seg88s[1:-1, 1:-1, 1:-1],
+                 name='anisotropic affinity watershed',
+                 scale=(4, 1, 1), blending='additive')
+    v.add_image(o88[-2], scale=(4, 1, 1), blending='additive',
+            colormap='magma', visible=False)
+    #v.add_points(s88, name='seeds', scale=(4, 1, 1), size=1, visible=False)
+
+    segment_worker = thread_worker(
+            segment_output_image,
+            connect={'yielded': s_layer.refresh},
+            )
+    worker = segment_worker(
+            o88, aff_chans, cent_chan, mask_chan, scale=(4, 1, 1),
+            out=seg88s.ravel(),
+            )
+
+    napari.run()
 

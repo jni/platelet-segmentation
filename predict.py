@@ -97,6 +97,15 @@ labels_layer = viewer.add_labels(
         translate=prediction_layers[-1].translate,
         )
 
+counter = 0
+def refresh_labels():
+    # we throttle labels refreshes because they take a long time
+    global counter
+    counter += 1
+    if counter % 10000 == 1:
+        labels_layer.refresh()
+
+
 # closure to connect to threadworker signal
 def segment(prediction):
     yield from ws.segment_output_image(
@@ -109,7 +118,7 @@ def segment(prediction):
 
 segment_worker = thread_worker(
     segment,
-    connect={'yielded': labels_layer.refresh}
+    connect={'yielded': refresh_labels}
 )
 
 prediction_worker = thread_worker(
