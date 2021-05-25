@@ -9,6 +9,7 @@ from napari.qt import thread_worker
 from skimage.exposure import rescale_intensity
 
 import unet
+import watershed as ws
 
 #u_state_fn = '/data/platelets-deep/210525_141407_basic_z-1_y-1_x-1_m_centg/212505_142127_unet_210525_141407_basic_z-1_y-1_x-1_m_centg.pt'
 u_state_fn = '/Users/jni/data/platelets-deep/212505_142127_unet_210525_141407_basic_z-1_y-1_x-1_m_centg.pt'
@@ -58,8 +59,9 @@ def predict_output_chunks(
         output_volume[(slice(None),) + sl][cr] = predicted_array[(0,) + cr]
         # print(f'output volume is prediction output', output_volume is prediction_output)
         yield
+    return output_volume
 
-viewer = napari.Viewer()
+viewer = napari.Viewer(ndisplay=3)
 l0 = viewer._add_layer_from_data(*layer_list[0])[0]
 l1 = viewer._add_layer_from_data(*layer_list[1])[0]
 l2 = viewer._add_layer_from_data(*layer_list[2])[0]
@@ -82,9 +84,40 @@ def refresh_prediction_layers():
         layer.refresh()
 
 
+labels = np.pad(
+    np.zeros(prediction_output.shape[1:], dtype=np.uint32),
+    1,
+    mode='constant',
+    constant_values=0,
+)
+labels_layer = viewer.add_labels(
+        labels[1:-1, 1:-1, 1:-1],
+        name='watershed',
+        scale=prediction_layers[-1].scale,
+        translate=prediction_layers[-1].translate,
+        )
+
+# closure to connect to threadworker signal
+def segment(prediction):
+    yield from ws.segment_output_image(
+        prediction,
+        affinities_channels=(0, 1, 2),
+        centroids_channel=4,
+        thresholding_channel=3,
+        out=labels.ravel()
+    )
+
+segment_worker = thread_worker(
+    segment,
+    connect={'yielded': labels_layer.refresh}
+)
+
 prediction_worker = thread_worker(
     predict_output_chunks,
-    connect={'yielded': refresh_prediction_layers}
+    connect={
+        'yielded': refresh_prediction_layers,
+        'returned': segment_worker
+        },
 )
 prediction_worker(u, vol2predict, size, chunk_starts, chunk_crops, prediction_output)
 

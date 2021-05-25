@@ -1,22 +1,27 @@
 from heapq import heappop, heappush
+import time
+
+from scipy import ndimage as ndi
 import numpy as np
 import napari
-import os
-from skimage.io import imread
-from skimage.measure import regionprops
+from skimage import filters, morphology, feature
 from skimage.morphology._util import _offsets_to_raveled_neighbors, _validate_connectivity
 
+
+SLEEP_PER_PIX = 0
 # ---------
 # Watershed
 # ---------
 
-def watershed(image, marker_coords, mask, 
-                   compactness=0, affinities=True, scale=None):
+def watershed(image, marker_coords, mask,
+                   compactness=0, affinities=True, scale=None, out=None):
     dim_weights = _prep_anisotropy(scale, marker_coords)
-    prepped_data = _prep_data(image, marker_coords, mask, affinities)
+    prepped_data = _prep_data(
+            image, marker_coords, mask, affinities, output=out
+            )
     image_raveled, marker_coords, offsets, mask, output, strides = prepped_data
-    output = slow_raveled_watershed(image_raveled, marker_coords, 
-                                    offsets, mask, strides, compactness, 
+    yield from slow_raveled_watershed(image_raveled, marker_coords,
+                                    offsets, mask, strides, compactness,
                                     output, affinities, dim_weights)
     if affinities:
         shape = image.shape[1:]
@@ -60,8 +65,8 @@ def _prep_data(image, marker_coords, mask=None, affinities=False, output=None):
     mask_raveled = mask.ravel()
     if output is None:
         output = np.zeros(mask_raveled.shape, dtype=raveled_image.dtype)
-        labels = np.arange(len(raveled_markers)) + 1
-        output[raveled_markers] = labels
+    labels = np.arange(len(raveled_markers)) + 1
+    output[raveled_markers] = labels
     strides = np.array(image_strides, dtype=np.intp) // image_itemsize
     return raveled_image, raveled_markers, offsets, mask_raveled, output, strides
 
@@ -93,11 +98,12 @@ def _prep_anisotropy(scale, marker_coords):
         # validate that the scale is appropriate for coordinates
         assert len(scale) == marker_coords.shape[1] 
         dim_weights = list(scale) + list(scale)[::-1]
+        dim_weights = list(map(abs, dim_weights))
     return dim_weights
 
 
-def slow_raveled_watershed(image_raveled, marker_coords, offsets, mask, 
-                           strides, compactness, output, affinities, 
+def slow_raveled_watershed(image_raveled, marker_coords, offsets, mask,
+                           strides, compactness, output, affinities,
                            dim_weights):
     '''
     Parameters
@@ -131,6 +137,8 @@ def slow_raveled_watershed(image_raveled, marker_coords, offsets, mask,
                 # non-marker, already visited, move on to next item
                 continue
             output[elem.index] = output[elem.source]
+            yield
+            time.sleep(SLEEP_PER_PIX)
         for i in range(n_neighbors):
             # get the flattened address of the neighbor
             if affinities:
@@ -166,6 +174,8 @@ def slow_raveled_watershed(image_raveled, marker_coords, offsets, mask,
                 # (may need to introduce a scaling hyperparameter)
             else:
                 output[neighbor_index] = output[elem.index]
+            yield
+            time.sleep(SLEEP_PER_PIX)
             new_elem.age = age
             new_elem.index = neighbor_index
             new_elem.source = elem.source
@@ -181,7 +191,7 @@ def _euclid_dist(pt0, pt1, strides):
         pt0 = pt0 % strides[i]
         pt1 = pt1 % strides[i]
     return np.sqrt(result)
-    
+
 
 class Element:
     def __init__(self, value=None, index=None, age=None, source=None):
@@ -250,6 +260,101 @@ class Heap:
 
     def size(self):
         return len(self.items)
+
+
+def segment_output_image(
+        unet_output,
+        affinities_channels,
+        centroids_channel,
+        thresholding_channel,
+        scale=None,
+        compactness=0.,
+        absolute_thresh=None,
+        out=None,
+    ):
+    '''
+    Parameters
+    ----------
+    unet_output: np.ndarray or dask.array.core.Array
+        Output from U-net inclusive of all channels. If there is an extra
+        dim of size 1, this will be squeezed out. Therefore shape may be
+        (1, c, z, y, x) or (c, z, y, x).
+    affinities_channels: tuple of int
+        Ints, in order (z, y, x) describe the channel indicies to which
+        the z, y, and x short-range affinities belong.
+    centroids_channel: int
+        Describes the channel index for the channel that is used to find
+        centroids.
+    thresholding_channel: in
+        Describes the channel index for the channel that is used to find
+        the mask for watershed.
+    '''
+    unet_output = np.asarray(np.squeeze(unet_output))
+    # Get the affinities image (a, z, y, x)
+    affinities = unet_output[list(affinities_channels)]
+    affinities /= np.max(affinities, axis=(1, 2, 3)).reshape((-1, 1, 1, 1))
+    affinities = np.pad(
+        affinities,
+        ((0, 0), (1, 1), (1, 1), (1, 1)),
+        mode='constant',
+        constant_values=0,
+    )
+    # Get the image for finding centroids
+    centroids_img = np.pad(
+        unet_output[centroids_channel],
+        1,
+        mode='constant',
+        constant_values=0,
+    )
+    # find the centroids
+    centroids = _get_centroids(centroids_img)
+    # Get the image for finding the mask
+    masking_img = unet_output[thresholding_channel]
+    # find the mask for use with watershed
+    if absolute_thresh is None:
+        mask = _get_mask(masking_img)
+    else:
+        mask = masking_img > absolute_thresh
+    mask = np.pad(mask, 1, constant_values=0) # edge voxels must be 0
+    mask, centroids = _remove_unwanted_objects(
+        mask, centroids, min_area=10, max_area=10000
+        )
+    # affinity-based watershed
+    segmentation = yield from watershed(
+            affinities, centroids, mask,
+            affinities=True, scale=scale,
+            compactness=compactness, out=out
+            )
+    segmentation = segmentation[1:-1, 1:-1, 1:-1]
+    seeds = centroids - 1
+    return segmentation, seeds, mask
+
+
+def _get_mask(img, sigma=2):
+    thresh = filters.threshold_otsu(
+        filters.gaussian(img, sigma=(sigma/4, sigma, sigma))
+        )
+    mask = img > thresh
+    return mask
+
+
+def _get_centroids(cent, gaussian=True):
+    if gaussian:
+        cent = filters.gaussian(cent, sigma=(0, 1, 1))
+    centroids = feature.peak_local_max(cent, threshold_abs=.04) #* c_scale
+    #centroids = blob_log(cent, min_sigma=min_sigma, max_sigma=max_sigma, threshold=threshold)
+    return centroids
+
+
+def _remove_unwanted_objects(mask, centroids, min_area=0, max_area=10000):
+    labels, _ = ndi.label(mask)
+    labels_no_small = morphology.remove_small_objects(labels, min_size=min_area)
+    labels_large = morphology.remove_small_objects(labels_no_small, min_size=max_area)
+    labels_goldilocks = labels_no_small ^ labels_large
+    centroid_labels = labels_goldilocks[tuple(centroids.T)]
+    new_centroids = centroids[centroid_labels > 0]
+    new_mask = labels_goldilocks.astype(bool)
+    return new_mask, new_centroids
 
 
 if __name__ == '__main__':
