@@ -3,18 +3,19 @@ import os
 import torch
 import napari
 import train
+import zarr
 
 
 # ------------------
 # Stable Local Paths
 # ------------------
 # Directory for training data and network output 
-data_dir = '/Users/amcg0011/Data/pia-tracking/cang_training'
+data_dir = '/data/platelets-deep'
 # Path for original image volumes for which GT was generated
-image_paths = [os.path.join(data_dir, '191113_IVMTR26_Inj3_cang_exp3_t58_zyx-coords.zarr')] #, 
+image_paths = [os.path.join(data_dir, '191113_IVMTR26_I3_E3_t58_cang_training_image.zarr')] #, 
                   # os.path.join(data_dir, '191113_IVMTR26_Inj3_cang_exp3_t74_zyx-coords.zarr')]
 # Path for GT labels volumes
-labels_paths = [os.path.join(data_dir, '191113_IVMTR26_Inj3_cang_exp3_labels_58_GT_zyx-coords.zarr')]#, 
+labels_paths = [os.path.join(data_dir, '191113_IVMTR26_I3_E3_t58_cang_training_labels.zarr')]#, 
                   #  os.path.join(data_dir, '191113_IVMTR26_Inj3_cang_exp3_labels_t74_GT_zyx-coords.zarr')]
 
 
@@ -22,7 +23,7 @@ labels_paths = [os.path.join(data_dir, '191113_IVMTR26_Inj3_cang_exp3_labels_58_
 # CHANGE THESE EACH TIME:
 # ---------------------------------------------------------------------------------------
 METHOD = 'get'
-out_dir = os.path.join(data_dir, '210331_training_0')
+out_dir = os.path.join(data_dir, '210525_training_0')
 suffix = 'z-1_z-2_y-1_y-2_y-3_x-1_x-2_x-3_c_cl'
 # ---------------------------------------------------------------------------------------
 
@@ -61,6 +62,10 @@ if METHOD == 'get':
                                        weights=weights,
                                        update_every=update_every
                                        )
+    image = zarr.open(image_paths[0])
+    viewer = napari.view_image(image)
+    napari.run()
+
 
 if METHOD == 'load':
     # to be continued ...
